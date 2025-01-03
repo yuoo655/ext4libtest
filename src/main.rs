@@ -1,15 +1,18 @@
 use ext4_rs::*;
-
-extern crate alloc;
-pub use alloc::sync::Arc;
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
+    ReplyEntry, ReplyWrite, Request, TimeOrNow,
 };
 use log::{Level, LevelFilter, Metadata, Record};
+use std::{
+    ffi::OsStr,
+    fs::OpenOptions,
+    io::{Read, Seek, Write},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use std::ffi::OsStr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+extern crate alloc;
+use alloc::sync::Arc;
 
 macro_rules! with_color {
     ($color_code:expr, $($arg:tt)*) => {{
@@ -138,31 +141,27 @@ pub struct Disk {}
 impl BlockDevice for Disk {
     fn read_offset(&self, offset: usize) -> Vec<u8> {
         // log::info!("read_offset: {:x?}", offset);
-        use std::fs::OpenOptions;
-        use std::io::{Read, Seek};
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .open("ex4.img")
             .unwrap();
-        let mut buf = vec![0u8; BLOCK_SIZE as usize];
-        let r = file.seek(std::io::SeekFrom::Start(offset as u64));
-        let r = file.read_exact(&mut buf);
+        let mut buf = vec![0u8; BLOCK_SIZE];
+        let _ = file.seek(std::io::SeekFrom::Start(offset as u64));
+        let _ = file.read_exact(&mut buf);
 
         buf
     }
 
     fn write_offset(&self, offset: usize, data: &[u8]) {
-        use std::fs::OpenOptions;
-        use std::io::{Read, Seek, Write};
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .open("ex4.img")
             .unwrap();
 
-        let r = file.seek(std::io::SeekFrom::Start(offset as u64));
-        let r = file.write_all(&data);
+        let _ = file.seek(std::io::SeekFrom::Start(offset as u64));
+        let _ = file.write_all(data);
     }
 }
 
@@ -172,7 +171,7 @@ struct Ext4Fuse {
 
 impl Ext4Fuse {
     pub fn new(ext4: Ext4) -> Self {
-        Self { ext4: ext4 }
+        Self { ext4 }
     }
 }
 
@@ -204,7 +203,7 @@ impl Filesystem for Ext4Fuse {
         let file_perm = file_attr.perm.bits();
 
         let attr = FileAttr {
-            ino: file_attr.ino as u64,
+            ino: file_attr.ino,
             size: file_attr.size,
             blocks: file_attr.blocks,
             atime: UNIX_EPOCH,
@@ -250,7 +249,7 @@ impl Filesystem for Ext4Fuse {
         let file_perm = file_attr.perm.bits();
 
         let attr = FileAttr {
-            ino: file_attr.ino as u64,
+            ino: file_attr.ino,
             size: file_attr.size,
             blocks: file_attr.blocks,
             atime: UNIX_EPOCH,
@@ -272,7 +271,7 @@ impl Filesystem for Ext4Fuse {
 
     fn setattr(
         &mut self,
-        req: &Request,
+        _req: &Request,
         inode: u64,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -370,7 +369,7 @@ impl Filesystem for Ext4Fuse {
         let file_perm = file_attr.perm.bits();
 
         let response_attr = FileAttr {
-            ino: file_attr.ino as u64,
+            ino: file_attr.ino,
             size: file_attr.size,
             blocks: file_attr.blocks,
             atime: timestamp_to_system_time(file_attr.atime),
@@ -438,7 +437,7 @@ impl Filesystem for Ext4Fuse {
                         2 => FileType::Directory,
                         _ => FileType::RegularFile,
                     };
-                    reply.add(entry.inode as u64, (i + 1) as i64, kind, &name);
+                    let _ = reply.add(entry.inode as u64, (i + 1) as i64, kind, &name);
                 }
                 reply.ok();
             }
@@ -533,7 +532,7 @@ impl Filesystem for Ext4Fuse {
                     nlink: 1,
                     uid: _req.uid(),
                     gid: _req.gid(),
-                    rdev: rdev as u32,
+                    rdev,
                     flags: 0,
                     blksize: BLOCK_SIZE as u32,
                 };
@@ -555,7 +554,6 @@ impl Filesystem for Ext4Fuse {
         umask: u32,
         reply: ReplyEntry,
     ) {
-
         // log::info!("mkdir name {:?} mode {:x?}", name, mode);
         let parent = match parent {
             // root
@@ -563,14 +561,17 @@ impl Filesystem for Ext4Fuse {
             _ => parent,
         };
 
-        let inode_ref = self.ext4.fuse_mkdir_with_attr(
-            parent,
-            name.to_str().unwrap(),
-            mode,
-            umask,
-            _req.uid(),
-            _req.gid(),
-        ).unwrap();
+        let inode_ref = self
+            .ext4
+            .fuse_mkdir_with_attr(
+                parent,
+                name.to_str().unwrap(),
+                mode,
+                umask,
+                _req.uid(),
+                _req.gid(),
+            )
+            .unwrap();
 
         let inode_num = inode_ref.inode_num;
         let attr = FileAttr {
@@ -586,7 +587,7 @@ impl Filesystem for Ext4Fuse {
             nlink: 2,
             uid: _req.uid(),
             gid: _req.gid(),
-            rdev: 0 as u32,
+            rdev: 0,
             flags: 0,
             blksize: BLOCK_SIZE as u32,
         };
@@ -610,34 +611,34 @@ impl Filesystem for Ext4Fuse {
     }
 }
 
-fn time_now() -> (i64, u32) {
-    time_from_system_time(&SystemTime::now())
-}
-
-fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
-    // Convert to signed 64-bit time with epoch at 0
-    match system_time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => (duration.as_secs() as i64, duration.subsec_nanos()),
-        Err(before_epoch_error) => (
-            -(before_epoch_error.duration().as_secs() as i64),
-            before_epoch_error.duration().subsec_nanos(),
-        ),
-    }
-}
-
-fn system_time_from_time(secs: i64, nsecs: u32) -> SystemTime {
-    if secs >= 0 {
-        UNIX_EPOCH + Duration::new(secs as u64, nsecs)
-    } else {
-        UNIX_EPOCH - Duration::new((-secs) as u64, nsecs)
-    }
-}
-
-fn system_time_to_timestamp(time: SystemTime) -> u32 {
-    time.duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_secs() as u32
-}
+// fn time_now() -> (i64, u32) {
+//     time_from_system_time(&SystemTime::now())
+// }
+//
+// fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
+//     // Convert to signed 64-bit time with epoch at 0
+//     match system_time.duration_since(UNIX_EPOCH) {
+//         Ok(duration) => (duration.as_secs() as i64, duration.subsec_nanos()),
+//         Err(before_epoch_error) => (
+//             -(before_epoch_error.duration().as_secs() as i64),
+//             before_epoch_error.duration().subsec_nanos(),
+//         ),
+//     }
+// }
+//
+// fn system_time_from_time(secs: i64, nsecs: u32) -> SystemTime {
+//     if secs >= 0 {
+//         UNIX_EPOCH + Duration::new(secs as u64, nsecs)
+//     } else {
+//         UNIX_EPOCH - Duration::new((-secs) as u64, nsecs)
+//     }
+// }
+//
+// fn system_time_to_timestamp(time: SystemTime) -> u32 {
+//     time.duration_since(UNIX_EPOCH)
+//         .unwrap_or(Duration::from_secs(0))
+//         .as_secs() as u32
+// }
 
 fn timestamp_to_system_time(timestamp: u32) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(timestamp as u64)
@@ -673,3 +674,6 @@ fn main() {
     options.push(MountOption::AllowRoot);
     fuser::mount2(ext4_fuse, mountpoint, &options).unwrap();
 }
+
+#[cfg(test)]
+mod tests;

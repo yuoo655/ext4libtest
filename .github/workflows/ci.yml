@@ -1,0 +1,28 @@
+name: Check and Test
+
+on: [push, pull_request]
+
+env:
+  GH_TOKEN: ${{ secrets.GH_TOKEN }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - run: sudo apt install libfuse-dev fuse3 libfuse3-dev -y
+    - name: set user_allow_other in /etc/fuse.conf
+      run: |
+        sudo chmod +777 /etc/fuse.conf
+        echo user_allow_other >> /etc/fuse.conf
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: clippy
+    - name: clippy
+      run: cargo clippy -- -D warnings
+    - name: test
+      run: |
+        sh gen_img.sh
+        # cargo run ./foo/ # this need two terminals or a separate test
+        cargo test
